@@ -1,0 +1,161 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Orders - messaging, consumer, table
+
+Parameters:
+  Env:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+
+Resources:
+  OrdersDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+
+  OrdersQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrdersDLQ.Arn
+        maxReceiveCount: 5
+
+  OrderCreatedTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Tags:
+        - Key: env
+          Value: !Ref Env
+
+  OrdersQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref OrdersQueue]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt OrdersQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref OrderCreatedTopic
+
+  TopicToQueue:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref OrderCreatedTopic
+      Protocol: sqs
+      Endpoint: !GetAtt OrdersQueue.Arn
+      RawMessageDelivery: true
+
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: orderId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: orderId
+          KeyType: HASH
+
+  ConsumerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 7
+
+  ConsumerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: consumer
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt OrdersQueue.Arn
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt OrdersTable.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt ConsumerLogGroup.Arn
+
+  ConsumerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.13
+      Handler: index.handler
+      Timeout: 30
+      Role: !GetAtt ConsumerRole.Arn
+      LoggingConfig:
+        LogGroup: !Ref ConsumerLogGroup
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref OrdersTable
+      Code:
+        ZipFile: |
+          import json, os, boto3
+          from botocore.exceptions import ClientError
+          table = boto3.resource("dynamodb").Table(os.environ["TABLE_NAME"])
+          def handler(event, context):
+              failures = []
+              for r in event["Records"]:
+                  try:
+                      order = json.loads(r["body"])
+                      table.put_item(Item=order, ConditionExpression="attribute_not_exists(orderId)")
+                  except ClientError as e:
+                      if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                          print("duplicate, skipped:", order["orderId"])
+                      else:
+                          failures.append({"itemIdentifier": r["messageId"]})
+                  except Exception as e:
+                      print("error:", e)
+                      failures.append({"itemIdentifier": r["messageId"]})
+              return {"batchItemFailures": failures}
+
+  QueueToFunction:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt OrdersQueue.Arn
+      FunctionName: !Ref ConsumerFunction
+      BatchSize: 10
+      FunctionResponseTypes: [ReportBatchItemFailures]
+
+  OrdersRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      ImageTagMutability: IMMUTABLE
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"keep last 10 images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}
+
+Outputs:
+  TopicArn:
+    Value: !Ref OrderCreatedTopic
+  QueueUrl:
+    Value: !Ref OrdersQueue
+  TableName:
+    Value: !Ref OrdersTable
+  RepoUri:
+    Value: !GetAtt OrdersRepo.RepositoryUri

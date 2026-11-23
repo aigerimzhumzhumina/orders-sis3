@@ -72,6 +72,11 @@
       "Effect": "Allow",
       "Action": "iam:GetRole",
       "Resource": "arn:aws:iam::200098097943:role/orders-app-dev-*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "elasticloadbalancing:Describe*",
+      "Resource": "*"
     }
   ]
 }

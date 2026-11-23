@@ -51,7 +51,10 @@
         "ecs:DescribeTaskDefinition",
         "ecs:DescribeServices",
         "ecs:DescribeClusters",
-        "ecs:UpdateService"
+        "ecs:UpdateService",
+        "ecs:TagResource",
+        "ecs:UntagResource",
+        "ecs:ListTagsForResource"
       ],
       "Resource": "*"
     },

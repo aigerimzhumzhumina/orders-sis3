@@ -198,7 +198,7 @@ Resources:
               awslogs-stream-prefix: api
 
   Service:
-    Type: AWS::ECS::Servise
+    Type: AWS::ECS::Service
     DependsOn: Listener
     Properties:
       Cluster: !Ref Cluster

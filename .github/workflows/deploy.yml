@@ -1,0 +1,38 @@
+name: deploy
+on:
+  push:
+    branches: [main]
+permissions:
+  id-token: write   # required for OIDC
+  contents: read
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: dev   # sub becomes ...:environment:dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Lint CloudFormation templates
+        run: pip install cfn-lint && cfn-lint base.yaml app.yaml
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Build and push image tagged with the commit SHA
+        run: |
+          REPO=${{ vars.ECR_REPO }}
+          aws ecr get-login-password | docker login -u AWS --password-stdin ${REPO%%/*}
+          docker build --platform linux/amd64 -t $REPO:$GITHUB_SHA app/
+          docker push $REPO:$GITHUB_SHA
+      - name: Deploy app stack with the new image
+        run: |
+          TOPIC=$(aws cloudformation describe-stacks --stack-name orders-base-dev \
+            --query "Stacks[0].Outputs[?OutputKey=='TopicArn'].OutputValue" --output text)
+          aws cloudformation deploy --stack-name orders-app-dev --template-file app.yaml \
+            --capabilities CAPABILITY_IAM --no-fail-on-empty-changeset \
+            --parameter-overrides Env=dev TopicArn="$TOPIC" ImageUri=${{ vars.ECR_REPO }}:$GITHUB_SHA
